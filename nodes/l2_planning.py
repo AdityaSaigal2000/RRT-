@@ -6,7 +6,14 @@ import pygame
 import time
 import pygame_utils
 import matplotlib.image as mpimg
-from skimage.draw import circle
+
+RUNNING_ON_LAB = True
+
+if RUNNING_ON_LAB:
+	from skimage.draw import circle
+else:
+	from skimage.draw import disk
+
 from scipy.linalg import block_diag
 import time
 
@@ -227,7 +234,10 @@ class PathPlanner:
 	#print(self.robot_radius/self.map_settings_dict["resolution"])
 	for pt in range(map_coords.shape[1]):
 		# Get occupancy footprint for each point and store the occupied rows and columns
-		rr, cc = circle(int(map_coords[0, pt]), int(map_coords[1, pt]), int(np.ceil(self.robot_radius/self.map_settings_dict["resolution"])))
+		if(RUNNING_ON_LAB):
+			rr, cc = circle(int(map_coords[0, pt]), int(map_coords[1, pt]), int(np.ceil(self.robot_radius/self.map_settings_dict["resolution"])))
+		else:
+			rr, cc = disk(map_coords[:, pt], self.robot_radius/self.map_settings_dict["resolution"])
 		rr = np.clip(rr, 0, self.map_shape[0] - 1)
 		cc = np.clip(cc, 0, self.map_shape[1] - 1)
 			
