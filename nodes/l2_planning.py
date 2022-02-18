@@ -8,7 +8,7 @@ import pygame_utils
 import matplotlib.image as mpimg
 from skimage.draw import circle
 from scipy.linalg import block_diag
-import copy
+import time
 
 #Map Handling Functions
 def load_map(filename):
@@ -43,8 +43,8 @@ class PathPlanner:
         self.bounds = np.zeros([2,2]) #m
         self.bounds[0, 0] = self.map_settings_dict["origin"][0]
         self.bounds[1, 0] = self.map_settings_dict["origin"][1]
-        self.bounds[0, 1] = self.map_settings_dict["origin"][0] + self.map_shape[0] * self.map_settings_dict["resolution"]
-        self.bounds[1, 1] = self.map_settings_dict["origin"][1] + self.map_shape[1] * self.map_settings_dict["resolution"]
+        self.bounds[0, 1] = self.map_settings_dict["origin"][0] + self.map_shape[1] * self.map_settings_dict["resolution"]
+        self.bounds[1, 1] = self.map_settings_dict["origin"][1] + self.map_shape[0] * self.map_settings_dict["resolution"]
 
         #Robot information
         self.robot_radius = 0.22 #m
@@ -223,14 +223,21 @@ class PathPlanner:
 	# Expects points in x, y format
 	map_coords = self.point_to_cell(points) # convert points to map indices (row col)
 	rows, cols = [], []
-	print(map_coords)
-	print(self.robot_radius/self.map_settings_dict["resolution"])
+	#print(map_coords)
+	#print(self.robot_radius/self.map_settings_dict["resolution"])
 	for pt in range(map_coords.shape[1]):
 		# Get occupancy footprint for each point and store the occupied rows and columns
 		rr, cc = circle(int(map_coords[0, pt]), int(map_coords[1, pt]), int(np.ceil(self.robot_radius/self.map_settings_dict["resolution"])))
-		rows.append(rr)
-		cols.append(cc)
+		rr = np.clip(rr, 0, self.map_shape[0] - 1)
+		cc = np.clip(cc, 0, self.map_shape[1] - 1)
+			
+		# Remove duplicates after clipping
+		rr, cc = zip(*set(zip(rr, cc)))
+		
+		rows.append(np.array(rr))
+		cols.append(np.array(cc))
 
+			
 	# Returns rows and cols occupied by circles centered at each point. Each array in the returned lists corresponds to a single point
 	return rows, cols
     
@@ -333,8 +340,10 @@ def main():
 	point_s = [-100, 100]
 	#print(path_planner.bounds)
 	#print(path_planner.map_shape)
-	#print(path_planner.point_to_cell(np.array([[59], [30.75]])))
-	print(path_planner.points_to_robot_circle(np.array([[59], [30.75]])))
+	#print(path_planner.point_to_cell(np.array([[59, 21], [30.75, 21]])))
+	
+	print(path_planner.points_to_robot_circle(np.array([[59, 21], [30.75, 21]])))
+	exit()
 	#path_planner.simulate_trajectory(init_node.point, point_s)
     
 	nodes = path_planner.rrt_star_planning()
