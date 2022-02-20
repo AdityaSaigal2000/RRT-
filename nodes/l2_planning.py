@@ -263,10 +263,25 @@ class PathPlanner:
     def connect_node_to_point(self, node_i, point_f):
         #Given two nodes find the non-holonomic path that connects them
         #Settings
-        #node is a 3 by 1 node
-        #point is a 2 by 1 point
-        print("TO DO: Implement a way to connect two already existing nodes (for rewiring).")
-        return np.zeros((3, self.num_substeps))
+        #node is a 3 by 1 node (with coordinates in the world space)
+        #point is a 2 by 1 point (with coordinates [x, y] in the map frame)
+        
+	# Aditya Saigal
+	# Function used to find a connection between newly sampled point and an existing node in the nearest neighbor list.
+	# Find the straight linear trajectory between the 2 points, as expressed in the world frame. If a line exists, then the heading can be adjusted to go from one node to the other.
+	# Use this for collision detection.
+
+	# Convert sample point to world frame
+
+	world_sample = np.array([[self.map_settings_dict["origin"][0] + point_f[0][0]*self.map_settings_dict["resolution"]], [self.map_settings_dict["origin"][1] + point_f[1][0]*self.map_settings_dict["resolution"]]]) # 2x1 vector
+
+	# Generate points between the 2 landmarks
+	xs = np.linspace(node_i[0], world_sample[0], self.num_substeps + 2)
+	ys = np.linspace(node_i[1], world_sample[1], self.num_substeps + 2)
+	thetas = np.array([np.arctan2(point_f[1] - node_i[1], point_f[0] - node_i[0])]*(self.num_substeps + 2)).reshape((12,)) 
+	
+	# Return sampled points on the trajectory in the world frame. Use previous collision detection functions to see if a collision free path exists
+	return np.vstack((xs, ys, thetas))
     
     def cost_to_come(self, trajectory_o):
         #The cost to get to a node from lavalle 
@@ -346,14 +361,15 @@ def main():
 	#RRT precursor	
 	path_planner = PathPlanner(map_filename, map_setings_filename, goal_point, stopping_dist)
     	
-	init_node = Node(np.array([[0], [0], [0]]), -1, 0)
-	point_s = [-100, 100]
+	pt_s = np.array([[0], [0], [0]])
+	pt_f = np.array([[10], [15]])	
+	
+	
 	#print(path_planner.bounds)
 	#print(path_planner.map_shape)
 	#print(path_planner.point_to_cell(np.array([[59, 21], [30.75, 21]])))
 	
-	print(path_planner.points_to_robot_circle(np.array([[59, 21], [30.75, 21]])))
-	exit()
+
 	#path_planner.simulate_trajectory(init_node.point, point_s)
     
 	nodes = path_planner.rrt_star_planning()
