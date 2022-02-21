@@ -64,12 +64,11 @@ class Node:
         Returns:
             - hashed value based on points converted to tuple
         '''
-        return hash(tuple(self.point[:,0]))
+        return hash(tuple(self.point[:2,0]))
 
 class NodeCollection:
     def __init__(self):
         self.list = []
-        self.set = set()
 
         # needed for kdtree, need features along cols, and points along rows
         # n.b. we only keep the [x, y] points in val_arr
@@ -93,17 +92,12 @@ class NodeCollection:
         return self.kdtree.query(point, k)
 
     def append(self, node):
-        self.set.add(node)
         self.list.append(node)
         if self.val_arr is None:
             self.val_arr = node.point[:2,:] if node.point.shape[1]==3 else node.point.T[:,:2]
         else:
             new_point = node.point if node.point.shape[1]==3 else node.point.T
             self.val_arr = np.vstack([self.val_arr, new_point[:,:2]])
-
-    def __contains__(self, point):
-        # Needed for 'in' operator
-        return tuple(point) in self.set
 
     def __len__(self):
         return len(self.list)
@@ -151,26 +145,34 @@ class PathPlanner:
         self.gamma_RRT = self.gamma_RRT_star + .1
         self.epsilon = 2.5
 
+        # Error threshold for Trajectory and Check
+        self.error_thresh = 1e-2
+
         #Pygame window for visualization
         # self.window = pygame_utils.PygameWindow(
         #    "Path Planner", (1000, 1000), self.occupancy_map.shape, self.map_settings_dict, self.goal_point, self.stopping_dist)
-        plt.imshow(self.occupancy_map)
-        plt.show()
         return
 
     #Functions required for RRT
-    def sample_map_space(self):
+    def sample_map_space(self, region=np.array([[0,0], [1600, 1600]])):
         '''
         Args:
-            - None
+            - region is an array of two points [[r,c],[r,c]] in map/cell frame
+            region[0,0] - top left row
+            region[0,1] - top left col
+            region[1,0] - bot right row
+            region[1,1,] - bot right col
         Returns:
             - gives random point within map space given some region, point is [x, y] numpy array
         TODO: add support for regions
         '''
         sample = np.random.rand(2,1)
-        sample[0,:] *= self.map_shape[1]
-        sample[1,:] *= self.map_shape[0]
-        return sample.astype(int)
+        sample[0,:] = region[0,0] + sample[0,:]*(region[1,0] - region[0,0])
+        sample[1,:] = region[0,1] + sample[1,:]*(region[1,1] - region[0,1])
+
+        sample = self.cell_to_point(sample)
+
+        return sample
 
     def check_if_duplicate(self, point):
         '''
@@ -179,7 +181,9 @@ class PathPlanner:
         Returns:
             - bool True if in NodeCollection otherwise no
         '''
-        return point in self.nodes
+        dist, ind = self.nodes.query(point, 1)
+
+        return dist[0] < self.error_thresh
 
     def closest_node(self, point):
         '''
@@ -192,7 +196,7 @@ class PathPlanner:
         dist, ind = self.nodes.query(point, 1)
         return ind[0]
 
-    def simulate_trajectory(self, node_i, point_s):
+    def simulate_trajectory(self, node_i, world_sample):
         #Simulates the non-holonomic motion of the robot.
         #This function drives the robot from node_i towards point_s. This function does has many solutions!
         #node_i is a 3 by 1 vector [x;y;theta] this can be used to construct the SE(2) matrix T_{OI} in course notation
@@ -203,18 +207,15 @@ class PathPlanner:
         # node_i is given in the world frame coordinates
         # Iteratively generate control commands and simulate a trajectory until point_s is reached on the map.
 
-        error_thresh = 0.1
-
         curr_point = node_i
         # convert the map coordinates to world coordinates
-        world_sample = np.array([[self.map_settings_dict["origin"][0] + point_s[0][0]*self.map_settings_dict["resolution"]], [self.map_settings_dict["origin"][1] + point_s[1][0]*self.map_settings_dict["resolution"]]]) # 2x1 vector
 
         #print(curr_point)
         #print(world_sample)
         #exit()
         complete_traj = None
         count = 0
-        while(np.linalg.norm(curr_point[0:2] - world_sample) > error_thresh):
+        while(np.linalg.norm(curr_point[0:2] - world_sample) > self.error_thresh):
                 #print(np.linalg.norm(curr_point[0:2] - world_sample))
                 #print(curr_point[0:2], world_sample)
                 v, w = self.robot_controller(curr_point , world_sample)
@@ -237,9 +238,12 @@ class PathPlanner:
 
                 else:
                         complete_traj = np.hstack((complete_traj, robot_traj))
-
-
-
+        """
+        tr, tc = self.point_to_cell(complete_traj)
+        plt.imshow(self.occupancy_map)
+        plt.plot(tc, tr)
+        plt.show()
+        """
         return complete_traj
 
     def robot_controller(self, node_i, point_s):
@@ -300,6 +304,16 @@ class PathPlanner:
 
         return np.vstack((x, y, theta))
 
+    def cell_to_point(self, cell):
+        # Convert a series of [x,y] cells in the cell occupancy indicies to the map frame
+        # point is a 2 by N matrix of points of interest
+        # return pixel coordinates/indices in (row, col) format
+
+        py = -(cell[0,:] - self.map_shape[0])*self.map_settings_dict["resolution"] + self.map_settings_dict["origin"][1]
+        px = cell[1,:]*self.map_settings_dict["resolution"] + self.map_settings_dict["origin"][0]
+
+        return np.vstack((px, py)) # return indices for all points
+
     def point_to_cell(self, point):
         #Convert a series of [x,y] points in the map to the indices for the corresponding cell in the occupancy map
         #point is a 2 by N matrix of points of interest
@@ -337,7 +351,6 @@ class PathPlanner:
 
             rows.append(np.array(rr))
             cols.append(np.array(cc))
-
 
         # Returns rows and cols occupied by circles centered at each point. Each array in the returned lists corresponds to a single point
         return rows, cols
@@ -384,38 +397,36 @@ class PathPlanner:
         print("TO DO: Update the costs of connected nodes after rewiring.")
         return
 
+    def collision_detected(self, trajectory):
+        # note that 0 means we cannot occupy that cell
+        # and 1 means that we are able to occupy it i.e.
+        # if all 1, then trajectory is valid
+        #TODO: Got index out of bounds error
+        # returns true if there is an obstacle in the way
+        oc_rows, oc_cols = self.points_to_robot_circle(trajectory[:2,:])
+        rows = np.hstack(oc_rows)
+        cols = np.hstack(oc_cols)
+        oc_cells = self.occupancy_map[rows, cols]
+        return (oc_cells == 0).any()
+
     #Planner Functions
-    def rrt_planning(self):
+    def rrt_planning(self, num_samples=1000, region=None):
         '''
         Args:
             - None
         Returns:
             - NodeCollection object of built RRT structure
         '''
-        def collision_free(trajectory):
-            # note that 0 means we cannot occupy that cell
-            # and 1 means that we are able to occupy it i.e.
-            # if all 1, then trajectory is valid
-            #TODO: Got index out of bounds error
-            # Need to ask aditya if there is an off by
-            # one error for the points_to_robot_circle function
-            oc_rows, oc_cols = self.points_to_robot_circle(trajectory[:2,:])
-            oc_cells = self.occupancy_map[oc_rows, oc_cols]
-            return (oc_cells == 0).any()
-
-        #This function performs RRT on the given map and robot
-        for i in range(10):
-            #Sample map space
-            sample = self.sample_map_space()
-
+        from tqdm import tqdm
+        def extend(sample, _remove=[]):
+            if self.check_if_duplicate(sample):
+                return
             #Get the closest point
             closest_node_id = self.closest_node(sample)
-
             #Simulate driving the robot towards the closest point
             trajectory_o = self.simulate_trajectory(self.nodes[closest_node_id].point, sample)
-
             #Check for collisions
-            if collision_free(trajectory_o):
+            if not self.collision_detected(trajectory_o):
                 '''
                 for i, point in enumerate(trajectory_o.T):
                     parent_id = len(self.nodes) if i > 0 else closest_node_id
@@ -433,12 +444,24 @@ class PathPlanner:
                 cost = np.sqrt(np.sum(np.square(parent.point[:2,:] - point[:2,:]))) + parent.cost
                 self.nodes.append(Node(point.T, parent_id, cost))
 
-                if np.sqrt(np.sum(np.square(sample[:2] - point[:2]))) < 0.1:
-                    print("Reached")
+                _remove.append(sample)
+                if np.sqrt(np.sum(np.square(point[:2] - self.goal_point))) < self.stopping_dist:
+                    return True
+            return False
 
-            #Check if goal has been reached
+        _remove = []
+        #This function performs RRT on the given map and robot
+        for _ in tqdm(range(num_samples)):
+            #Sample map space
+            sample = self.sample_map_space() if region is None else self.sample_map_space(region)
+            if extend(sample, _remove):
+                break
 
-        return self.nodes
+        # Slightly different, do extend with goal points
+        # If need to use RRT later, remove the below code
+        extend(self.goal_point, _remove)
+        goal_cell = self.point_to_cell(self.goal_point)
+        return self.nodes, _remove
 
     def rrt_star_planning(self):
         #This function performs RRT* for the given map and robot
