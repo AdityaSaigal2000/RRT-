@@ -3,7 +3,6 @@ import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.chdir(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-print(sys.path)
 from l2_planning import *
 import matplotlib.pyplot as plt
 
@@ -28,7 +27,12 @@ def main():
         #RRT precursor
         path_planner = PathPlanner(map_filename, map_setings_filename, goal_point, stopping_dist)
 
-        nodes, samples = path_planner.rrt_planning(1000, region)
+        path_planner.occupancy_map[588:640, 404] = 0
+        path_planner.occupancy_map[1376, 404:985] = 0
+        path_planner.occupancy_map[687:777, 1293] = 0
+        region = np.array([[0.4, 10],[0,0]])
+        nodes, samples = path_planner.rrt_planning(5000, region, 'polar')
+
         node_path_metric = np.hstack(path_planner.recover_path())
         samples = np.hstack(samples)
         sr, sc = path_planner.point_to_cell(samples)

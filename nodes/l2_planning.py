@@ -1,5 +1,8 @@
 #!/usr/bin/env python
 #Standard Libraries
+import heapq as hq
+from enum import Enum
+from tqdm import tqdm
 import numpy as np
 import yaml
 import pygame
@@ -7,6 +10,11 @@ import matplotlib.image as mpimg
 import time
 from scipy.linalg import block_diag
 from scipy.spatial import KDTree
+
+class Extend(Enum):
+    FAILED = 2
+    SUCCESS = 0
+    HITGOAL = 1
 
 try:
     # pygame_utils file doesn't have correct magic number i.e. wont run locally
@@ -16,20 +24,12 @@ except:
 
 try:
     from skimage.draw import circle as circle_jerk
-    def circle(x,y,r):
+    def circle(x, y, r):
         return circle_jerk(int(x), int(y), int(r))
 except:
     from skimage.draw import disk
-    def circle(x,y, r):
+    def circle(x, y, r):
         return disk((x,y), r)
-
-
-'''
-Node Lifecycle variables
-'''
-NODE_ALIVE=0
-NODE_DEAD=1
-
 
 # y corresponds to rows
 # x corresponds to cols
@@ -49,13 +49,19 @@ def load_map_yaml(filename):
 
 #Node for building a graph
 class Node:
-    def __init__(self, point, parent_id, cost):
+    def __init__(self, point, parent_id, cost, heuristic=0):
         self.point = point # A 3 by 1 vector [x, y, theta]
         self.parent_id = parent_id # The parent node id that leads to this node (There should only every be one parent in RRT)
         self.cost = cost # The cost to come to this node
+        self.full_cost = cost + 5*heuristic # A_start like total cost function used for sampling priority, weight exploration more
         self.children_ids = [] # The children node ids of this node
-        self.lifecycle = NODE_ALIVE
+        self.num_fails = 0 #number of times we failed to sample a good point from this node
         return
+
+    def __repr__(self):
+        return f"{self.full_cost}"
+    def __lt__(self, other_inst):
+        return self.full_cost < other_inst.full_cost
 
     def __hash__(self):
         '''
@@ -70,10 +76,28 @@ class NodeCollection:
     def __init__(self):
         self.list = []
 
+        # This is for local sampling
+        # maintain frontier so that we only search alive nodes
+        # made with priorty queue of the alive nodes
+        # by default this is a min heap
+        self.frontier = []
+
         # needed for kdtree, need features along cols, and points along rows
         # n.b. we only keep the [x, y] points in val_arr
         self.val_arr = None
         self.kdtree = None
+
+    def get_sample_center(self):
+        # used for sampling, get
+        # the node we should sample near based on full_cost (ctc + heuristic)
+        if len(self.frontier) == 0:
+            return None
+        node = self.frontier[0]
+        # Keep no matter what
+        if self.frontier[0].num_fails == 10:
+            hq.heappop(self.frontier)
+
+        return node
 
     def rebuild_kdtree(self):
         self.kdtree = KDTree(self.val_arr, leafsize=40)
@@ -93,11 +117,14 @@ class NodeCollection:
 
     def append(self, node):
         self.list.append(node)
+        hq.heappush(self.frontier, node)
+
         if self.val_arr is None:
             self.val_arr = node.point[:2,:] if node.point.shape[1]==3 else node.point.T[:,:2]
         else:
             new_point = node.point if node.point.shape[1]==3 else node.point.T
             self.val_arr = np.vstack([self.val_arr, new_point[:,:2]])
+
 
     def __len__(self):
         return len(self.list)
@@ -136,7 +163,7 @@ class PathPlanner:
 
         #Planning storage
         self.nodes =  NodeCollection()
-        self.nodes.append(Node(np.zeros((3,1)), -1, 0))
+        self.nodes.append(Node(np.zeros((3,1)), -1, 0, np.sqrt(np.sum(np.square(self.goal_point)))))
 
         #RRT* Specific Parameters
         self.lebesgue_free = np.sum(self.occupancy_map) * self.map_settings_dict["resolution"] **2
@@ -154,7 +181,7 @@ class PathPlanner:
         return
 
     #Functions required for RRT
-    def sample_map_space(self, region=np.array([[0,0], [1600, 1600]])):
+    def sample_map_space(self, region=np.array([[0,0], [1600, 1600]]), rep="", center=None):
         '''
         Args:
             - region is an array of two points [[r,c],[r,c]] in map/cell frame
@@ -162,15 +189,35 @@ class PathPlanner:
             region[0,1] - top left col
             region[1,0] - bot right row
             region[1,1,] - bot right col
+            - rep:
+            "polar" - sample in between a donout around the live nodes
+            default - cartesian sample within provided box
+            - center array of 2x1 [x,y] used in polar, use this to pass in the location of node frontier
         Returns:
             - gives random point within map space given some region, point is [x, y] numpy array
         TODO: add support for regions
         '''
-        sample = np.random.rand(2,1)
-        sample[0,:] = region[0,0] + sample[0,:]*(region[1,0] - region[0,0])
-        sample[1,:] = region[0,1] + sample[1,:]*(region[1,1] - region[0,1])
 
-        sample = self.cell_to_point(sample)
+        sample = np.random.rand(2,1)
+        if rep == "polar" and center is not None:
+            rmin, rmax = region[0, :]
+            radius = rmin + sample[0,0]*(rmax - rmin)
+            theta = 2*np.pi*sample[1,0]
+
+            sample = np.array([
+                [radius*np.cos(theta) + center[0]],
+                [radius*np.sin(theta) + center[1]]
+            ])
+
+        else:
+            if center is None and rep =='polar':
+                # Fall back
+                region = np.array([[350, 400],
+                                   [1600, 1300]])
+
+            sample[0,0] = region[0,0] + sample[0,0]*(region[1,0] - region[0,0])
+            sample[1,0] = region[0,1] + sample[1,0]*(region[1,1] - region[0,1])
+            sample = self.cell_to_point(sample)
 
         return sample
 
@@ -183,7 +230,7 @@ class PathPlanner:
         '''
         dist, ind = self.nodes.query(point, 1)
 
-        return dist[0] < self.error_thresh
+        return dist[0] < 0.2
 
     def closest_node(self, point):
         '''
@@ -403,6 +450,10 @@ class PathPlanner:
         # if all 1, then trajectory is valid
         #TODO: Got index out of bounds error
         # returns true if there is an obstacle in the way
+
+        #returns True if trajectory DNE
+        if trajectory is None:
+            return True
         oc_rows, oc_cols = self.points_to_robot_circle(trajectory[:2,:])
         rows = np.hstack(oc_rows)
         cols = np.hstack(oc_cols)
@@ -410,51 +461,49 @@ class PathPlanner:
         return (oc_cells == 0).any()
 
     #Planner Functions
-    def rrt_planning(self, num_samples=1000, region=None):
+    def rrt_planning(self, num_samples=1000, region=None, rep=""):
         '''
         Args:
             - None
         Returns:
             - NodeCollection object of built RRT structure
         '''
-        from tqdm import tqdm
         def extend(sample, _remove=[]):
             if self.check_if_duplicate(sample):
-                return
+                return Extend.FAILED
+
             #Get the closest point
             closest_node_id = self.closest_node(sample)
+
             #Simulate driving the robot towards the closest point
             trajectory_o = self.simulate_trajectory(self.nodes[closest_node_id].point, sample)
+
             #Check for collisions
             if not self.collision_detected(trajectory_o):
-                '''
-                for i, point in enumerate(trajectory_o.T):
-                    parent_id = len(self.nodes) if i > 0 else closest_node_id
-                    parent = self.nodes[parent_id]
-                    cost = np.sqrt(np.sum(np.square(parent.point[:2,:] - point[:2,:])))
-                    self.nodes.append(Node(point.T, parent_id, cost))
-
-                if np.sqrt(np.sum(np.square(sample[:2] - point[:2]))) < 0.1:
-                    print("Reached")
-                '''
-
-                point = trajectory_o.T[None,-1, :]
+                point = trajectory_o.T[-1, :,None]
                 parent_id = closest_node_id
                 parent = self.nodes[parent_id]
-                cost = np.sqrt(np.sum(np.square(parent.point[:2,:] - point[:2,:]))) + parent.cost
-                self.nodes.append(Node(point.T, parent_id, cost))
+                cost = np.sqrt(np.sum(np.square(parent.point[:2, 0] - point[:2, 0]))) + parent.cost
+                self.nodes.append(Node(point, parent_id, cost, np.sqrt(np.sum(np.square(point[:2, 0] - self.goal_point[:2, 0])))))
 
                 _remove.append(sample)
-                if np.sqrt(np.sum(np.square(point[:2] - self.goal_point))) < self.stopping_dist:
-                    return True
-            return False
+                if np.sqrt(np.sum(np.square(point[:2, 0] - self.goal_point[:2, 0]))) < self.stopping_dist:
+                    return Extend.HITGOAL
+                return Extend.SUCCESS
+            else:
+                return Extend.FAILED
 
         _remove = []
         #This function performs RRT on the given map and robot
         for _ in tqdm(range(num_samples)):
             #Sample map space
-            sample = self.sample_map_space() if region is None else self.sample_map_space(region)
-            if extend(sample, _remove):
+            sample_anchor = self.nodes.get_sample_center()
+            anchor = sample_anchor if sample_anchor is None else sample_anchor.point[:2, 0]
+            sample = self.sample_map_space(region, "polar", sample_anchor.point[:2,0] ) if rep == "polar" else self.sample_map_space(region)
+            ret_val = extend(sample, _remove)
+            if ret_val == Extend.FAILED:
+                sample_anchor.num_fails += 1
+            if ret_val == Extend.HITGOAL:
                 break
 
         # Slightly different, do extend with goal points
