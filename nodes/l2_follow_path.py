@@ -16,6 +16,15 @@ from visualization_msgs.msg import Marker
 # ros and se2 conversion utils
 import utils
 
+try:
+    from skimage.draw import circle as circle_jerk
+    def circle(x, y, r):
+        return circle_jerk(int(x), int(y), int(r))
+except:
+    from skimage.draw import disk
+    def circle(x, y, r):
+        return disk((x,y), r)
+
 
 TRANS_GOAL_TOL = .1  # m, tolerance to consider a goal complete
 ROT_GOAL_TOL = .3  # rad, tolerance to consider a goal complete
@@ -31,8 +40,8 @@ MIN_TRANS_DIST_TO_USE_ROT = TRANS_GOAL_TOL  # m, robot has to be within this dis
 PATH_NAME = 'path.npy'  # saved path from l2_planning.py, should be in the same directory as this file
 
 # here are some hardcoded paths to use if you want to develop l2_planning and this file in parallel
-# TEMP_HARDCODE_PATH = [[2, 0, 0], [2.75, -1, -np.pi/2], [2.75, -4, -np.pi/2], [2, -4.4, np.pi]]  # almost collision-free
-TEMP_HARDCODE_PATH = [[2, -.5, 0], [2.4, -1, -np.pi/2], [2.45, -3.5, -np.pi/2], [1.5, -4.4, np.pi]]  # some possible collisions
+TEMP_HARDCODE_PATH = [[2, 0, 0], [2.75, -1, -np.pi/2], [2.75, -4, -np.pi/2], [2, -4.4, np.pi]]  # almost collision-free
+# TEMP_HARDCODE_PATH = [[2, -.5, 0], [2.4, -1, -np.pi/2], [2.45, -3.5, -np.pi/2], [1.5, -4.4, np.pi]]  # some possible collisions
 
 
 class PathFollower():
@@ -85,8 +94,8 @@ class PathFollower():
         cur_dir = os.path.dirname(os.path.realpath(__file__))
 
         # to use the temp hardcoded paths above, switch the comment on the following two lines
-        self.path_tuples = np.load(os.path.join(cur_dir, 'path.npy')).T
-        # self.path_tuples = np.array(TEMP_HARDCODE_PATH)
+        # self.path_tuples = np.load(os.path.join(cur_dir, 'path.npy')).T
+        self.path_tuples = np.array(TEMP_HARDCODE_PATH)
 
         self.path = utils.se2_pose_list_to_path(self.path_tuples, 'map')
         self.global_path_pub.publish(self.path)
@@ -113,6 +122,83 @@ class PathFollower():
         rospy.on_shutdown(self.stop_robot_on_shutdown)
         self.follow_path()
 
+    def trajectory_rollout(self, init_theta, vel, rot_vel):
+        # Given your chosen velocities determine the trajectory of the robot for your given timestep
+        # The returned trajectory should be a series of points to check for collisions
+
+        # Aditya Saigal
+        sample_times = np.linspace(INTEGRATION_DT, CONTROL_HORIZON + INTEGRATION_DT, self.horizon_timesteps + 1)
+
+        if(rot_vel):
+                # When a non-zero angular velocity is applied
+                x = (vel/rot_vel)*np.sin(rot_vel*sample_times + init_theta)
+                y = (vel/rot_vel)*(1 - np.cos(rot_vel*sample_times + init_theta))
+        else:
+                # Only a linear velocity is applied
+                x = (vel)*np.cos(init_theta)*sample_times
+                y = (vel)*np.sin(init_theta)*sample_times
+        theta = rot_vel*sample_times
+
+        return np.vstack((x, y, theta))
+
+    def point_to_cell(self, point):
+        #Convert a series of [x,y] points in the map to the indices for the corresponding cell in the occupancy map
+        #point is a 2 by N matrix of points of interest
+        #print("TO DO: Implement a method to get the map cell the robot is currently occupying")
+
+        #Aditya Saigal
+        # return pixel coordinates/indices in (row, col) format
+
+
+        row = self.map_np.shape[0] - (point[1] - self.map_origin[1])/self.map_resolution # Find y coordinate wrt lower left corner. Subtract from number of rows in map
+        col = (point[0] - self.map_origin[0])/self.map_resolution # Find x coordinate wrt lower left corner. This is the column
+
+        return np.vstack((row, col)) # return indices for all points
+
+    def points_to_robot_circle(self, points):
+        #Convert a series of [x,y] points to robot map footprints for collision detection
+        #Hint: The disk function is included to help you with this function
+        #print("TO DO: Implement a method to get the pixel locations of the robot path")
+        #Aditya Saigal
+
+        # Expects points in x, y format
+        map_coords = self.point_to_cell(points) # convert points to map indices (row col)
+        rows, cols = [], []
+        #print(map_coords)
+        #print(self.robot_radius/self.map_settings_dict["resolution"])
+        for pt in range(map_coords.shape[1]):
+            # Get occupancy footprint for each point and store the occupied rows and columns
+            rr, cc = circle(map_coords[0, pt], map_coords[1, pt], np.ceil(COLLISION_RADIUS/self.map_resolution))
+
+            rr = np.clip(rr, 0, self.map_np.shape[0] - 1)
+            cc = np.clip(cc, 0, self.map_np.shape[1] - 1)
+
+            # Remove duplicates after clipping
+            rr, cc = zip(*set(zip(rr, cc)))
+
+            rows.append(np.array(rr))
+            cols.append(np.array(cc))
+
+        # Returns rows and cols occupied by circles centered at each point. Each array in the returned lists corresponds to a single point
+        return rows, cols
+
+    def collision_detected(self, trajectory):
+        # note that 0 means we cannot occupy that cell
+        # and 1 means that we are able to occupy it i.e.
+        # if all 1, then trajectory is valid
+        #TODO: Got index out of bounds error
+        # returns true if there is an obstacle in the way
+
+        #returns True if trajectory DNE
+        if trajectory is None:
+            return True
+        oc_rows, oc_cols = self.points_to_robot_circle(trajectory[:2,:])
+        rows = np.hstack(oc_rows)
+        cols = np.hstack(oc_cols)
+        oc_cells = self.map_np[rows, cols]
+        return (oc_cells == 0).any()
+
+
     def follow_path(self):
         while not rospy.is_shutdown():
             # timing for debugging...loop time should be less than 1/CONTROL_RATE
@@ -125,28 +211,31 @@ class PathFollower():
             local_paths = np.zeros([self.horizon_timesteps + 1, self.num_opts, 3])
             local_paths[0] = np.atleast_2d(self.pose_in_map_np).repeat(self.num_opts, axis=0)
 
-            print("TO DO: Propogate the trajectory forward, storing the resulting points in local_paths!")
-            for t in range(1, self.horizon_timesteps + 1):
-                # propogate trajectory forward, assuming perfect control of velocity and no dynamic effects
-                pass
+            # print("TO DO: Propogate the trajectory forward, storing the resulting points in local_paths!")
+            for i in range(self.num_opts):
+                curr_opt = self.all_opts[i, :]
+                local_paths[:, i, :] = self.trajectory_rollout(self.pose_in_map_np[2], curr_opt[0], curr_opt[1]).T
+
 
             # check all trajectory points for collisions
             # first find the closest collision point in the map to each local path point
             local_paths_pixels = (self.map_origin[:2] + local_paths[:, :, :2]) / self.map_resolution
             valid_opts = range(self.num_opts)
             local_paths_lowest_collision_dist = np.ones(self.num_opts) * 50
-
-            print("TO DO: Check the points in local_path_pixels for collisions")
-            for opt in range(local_paths_pixels.shape[1]):
-                for timestep in range(local_paths_pixels.shape[0]):
-                    pass
-
+            # print("TO DO: Check the points in local_path_pixels for collisions")
+            for opt in range(self.num_opts):
+                trajectory = local_paths[:, opt, :]
+                if (self.collision_detected(trajectory)):
+                    # Delete this option if there is a collision:
+                    np.delete(valid_opts, opt)
             # remove trajectories that were deemed to have collisions
-            print("TO DO: Remove trajectories with collisions!")
+            # print("TO DO: Remove trajectories with collisions!")
+            local_paths = local_paths[:, valid_opts, :]
+            num_valid_paths = local_paths.shape[1]
 
             # calculate final cost and choose best option
-            print("TO DO: Calculate the final cost and choose the best control option!")
-            final_cost = np.zeros(self.num_opts)
+            # print("TO DO: Calculate the final cost and choose the best control option!")
+            final_cost = np.linalg.norm(local_paths[-1, :, :] - self.cur_goal.reshape(1, 3), axis=1)
             if final_cost.size == 0:  # hardcoded recovery if all options have collision
                 control = [-.1, 0]
             else:
