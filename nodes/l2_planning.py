@@ -463,12 +463,6 @@ class PathPlanner:
         return True
 
     def collision_detected(self, trajectory):
-        # note that 0 means we cannot occupy that cell
-        # and 1 means that we are able to occupy it i.e.
-        # if all 1, then trajectory is valid
-        #TODO: Got index out of bounds error
-        # returns true if there is an obstacle in the way
-
         #returns True if trajectory DNE
         if trajectory is None:
             return True
@@ -531,8 +525,58 @@ class PathPlanner:
         return self.nodes, _remove
 
     def rrt_star_planning(self):
-        #This function performs RRT* for the given map and robot
-        for i in range(1): #Most likely need more iterations than this to complete the map!
+        '''
+        Args:
+            - None
+        Returns:
+            - NodeCollection object of built RRT structure
+        '''
+        def extend(sample, _remove=[]):
+            if self.check_if_duplicate(sample):
+                return Extend.FAILED
+
+            #Get the closest point
+            closest_node_id = self.closest_node(sample)
+
+            #Simulate driving the robot towards the closest point
+            trajectory_o = self.simulate_trajectory(self.nodes[closest_node_id].point, sample)
+
+            #Check for collisions
+            if not self.collision_detected(trajectory_o):
+                point = trajectory_o.T[-1, :,None]
+                parent_id = closest_node_id
+                parent = self.nodes[parent_id]
+                cost = np.sqrt(np.sum(np.square(parent.point[:2, 0] - point[:2, 0]))) + parent.cost
+                self.nodes.append(Node(point, parent_id, cost, np.sqrt(np.sum(np.square(point[:2, 0] - self.goal_point[:2, 0])))))
+
+                _remove.append(sample)
+                if np.sqrt(np.sum(np.square(point[:2, 0] - self.goal_point[:2, 0]))) < self.stopping_dist:
+                    return Extend.HITGOAL
+                return Extend.SUCCESS
+            else:
+                return Extend.FAILED
+
+        _remove = []
+
+        #This function performs RRT on the given map and robot
+        for _ in tqdm(range(num_samples)):
+            #Sample map space
+            sample_anchor = self.nodes.get_sample_center()
+            anchor = sample_anchor if sample_anchor is None else sample_anchor.point[:2, 0]
+            sample = self.sample_map_space(region, "polar", sample_anchor.point[:2,0] ) if rep == "polar" else self.sample_map_space(region)
+            ret_val = extend(sample, _remove)
+            if ret_val == Extend.FAILED:
+                sample_anchor.num_fails += 1
+            if ret_val == Extend.HITGOAL:
+                break
+
+        # Slightly different, do extend with goal points
+        # If need to use RRT later, remove the below code
+        extend(self.goal_point, _remove)
+        goal_cell = self.point_to_cell(self.goal_point)
+        # This function performs RRT* for the given map and robot
+
+        for _ in range(1): #Most likely need more iterations than this to complete the map!
             #Sample
             point = self.sample_map_space()
 
@@ -554,7 +598,8 @@ class PathPlanner:
 
             #Check for early end
             print("TO DO: Check for early end")
-        return self.nodes
+
+        return self.nodes, _remove
 
     def recover_path(self, node_id = -1):
         path = [self.nodes[node_id].point]
