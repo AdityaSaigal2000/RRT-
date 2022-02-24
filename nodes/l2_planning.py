@@ -125,6 +125,9 @@ class NodeCollection:
             new_point = node.point if node.point.shape[1]==3 else node.point.T
             self.val_arr = np.vstack([self.val_arr, new_point[:,:2]])
 
+        # update children ids of parent
+        if node.parent_id != -1:
+            self[node.parent_id].children_ids.append(len(self)-1)
 
     def __len__(self):
         return len(self.list)
@@ -411,20 +414,16 @@ class PathPlanner:
         card_V = len(self.nodes)
         return min(self.gamma_RRT * (np.log(card_V) / card_V ) ** (1.0/2.0), self.epsilon)
 
-    def connect_node_to_point(self, node_i, point_f):
+    def connect_node_to_point(self, node_i, world_sample):
         #Given two nodes find the non-holonomic path that connects them
         #Settings
         #node is a 3 by 1 node (with coordinates in the world space)
-        #point is a 2 by 1 point (with coordinates [x, y] in the map frame)
+        #world_sample is a 2 by 1 point (with coordinates [x, y] in world sapce)
 
         # Aditya Saigal
         # Function used to find a connection between newly sampled point and an existing node in the nearest neighbor list.
         # Find the straight linear trajectory between the 2 points, as expressed in the world frame. If a line exists, then the heading can be adjusted to go from one node to the other.
         # Use this for collision detection.
-
-        # Convert sample point to world frame
-
-        world_sample = np.array([[self.map_settings_dict["origin"][0] + point_f[0][0]*self.map_settings_dict["resolution"]], [self.map_settings_dict["origin"][1] + point_f[1][0]*self.map_settings_dict["resolution"]]]) # 2x1 vector
 
         # Generate points between the 2 landmarks
         xs = np.linspace(node_i[0], world_sample[0], self.num_substeps + 2)
@@ -436,13 +435,32 @@ class PathPlanner:
 
     def cost_to_come(self, trajectory_o):
         #The cost to get to a node from lavalle
-        print("TO DO: Implement a cost to come metric")
-        return 0
+        dist_traveled=np.linalg.norm(trajectory_o[:2,0] - trajectory_o[:2,-1])
+        return dist_traveled
 
-    def update_children(self, node_id):
+    def node_cost_to_come(self, node_id_1,  node_id_2):
+        # Calculate the l2-norm distance between two node objects
+        dist_traveled = np.linalg.norm(self.nodes[node_id_1].point[:2, 0] -self.nodes[node_id_2].point[:2,0])
+        return dist_traveled
+
+    def update_children(self, node_id, old_cost):
+        '''
+        Args:
+            node_id - int the id of the node that was changed, i.e some parent that
+            was rewired
+            old_cost - float, the old cost to come to node_id, before rewiring
+        Returns:
+            Nothing - update happens silently
+        '''
         #Given a node_id with a changed cost, update all connected nodes with the new cost
-        print("TO DO: Update the costs of connected nodes after rewiring.")
-        return
+
+        ids_update_required = self.nodes[node_id].children_ids[:]
+        new_cost = self.nodes[node_id].cost
+        while len(ids_update_required) > 0:
+            problem_child = ids_update_required.pop(0)
+            self.nodes[problem_child].cost += new_cost - old_cost
+            ids_update_required += self.nodes[problem_child].children_ids
+        return True
 
     def collision_detected(self, trajectory):
         # note that 0 means we cannot occupy that cell
@@ -483,8 +501,8 @@ class PathPlanner:
                 point = trajectory_o.T[-1, :,None]
                 parent_id = closest_node_id
                 parent = self.nodes[parent_id]
-                cost = np.sqrt(np.sum(np.square(parent.point[:2, 0] - point[:2, 0]))) + parent.cost
-                self.nodes.append(Node(point, parent_id, cost, np.sqrt(np.sum(np.square(point[:2, 0] - self.goal_point[:2, 0])))))
+                cost = np.linalg.norm(parent.point[:2, 0] - point[:2, 0]) + parent.cost
+                self.nodes.append(Node(point, parent_id, cost, np.linalg.norm(point[:2, 0] - self.goal_point[:2, 0])))
 
                 _remove.append(sample)
                 if np.sqrt(np.sum(np.square(point[:2, 0] - self.goal_point[:2, 0]))) < self.stopping_dist:
