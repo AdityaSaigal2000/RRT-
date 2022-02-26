@@ -31,13 +31,13 @@ ROT_GOAL_TOL = .3  # rad, tolerance to consider a goal complete
 TRANS_VEL_OPTS = [0.0, 0.025, 0.13, 0.26]  # m/s, max of real robot is .26
 ROT_VEL_OPTS = np.linspace(-1.82, 1.82, 11)  # rad/s, max of real robot is 1.82
 CONTROL_RATE = 5  # Hz, how frequently control signals are sent
-CONTROL_HORIZON = 1.0  # seconds. if this is set too high and INTEGRATION_DT is too low, code will take a long time to run!
-INTEGRATION_DT = .05  # s, delta t to propagate trajectories forward by
+CONTROL_HORIZON = 0.75  # seconds. if this is set too high and INTEGRATION_DT is too low, code will take a long time to run!
+INTEGRATION_DT = .025  # s, delta t to propagate trajectories forward by
 COLLISION_RADIUS = 0.225  # m, radius from base_link to use for collisions, min of 0.2077 based on dimensions of .281 x .306
-ROT_DIST_MULT = 1  # multiplier to change effect of rotational distance in choosing correct control
+ROT_DIST_MULT = 15  # multiplier to change effect of rotational distance in choosing correct control
 OBS_DIST_MULT = .1  # multiplier to change the effect of low distance to obstacles on a path
-MIN_TRANS_DIST_TO_USE_ROT = .1  # m, robot has to be within this distance to use rot distance in cost
-PATH_NAME = 'path_complete.npy'  # saved path from l2_planning.py, should be in the same directory as this file
+MIN_TRANS_DIST_TO_USE_ROT = .1 # m, robot has to be within this distance to use rot distance in cost
+PATH_NAME = 'shortest_path_20000.npy'  # saved path from l2_planning.py, should be in the same directory as this file
 
 # here are some hardcoded paths to use if you want to develop l2_planning and this file in parallel
 TEMP_HARDCODE_PATH = [[2, -0.5, 0], [2.75, -1, -np.pi/2], [2.75, -4, -np.pi/2], [2, -4.4, np.pi]]  # almost collision-free
@@ -95,8 +95,8 @@ class PathFollower():
         cur_dir = os.path.dirname(os.path.realpath(__file__))
 
         # to use the temp hardcoded paths above, switch the comment on the following two lines
-        # self.path_tuples = np.load(os.path.join(cur_dir, PATH_NAME)).T
-        self.path_tuples = np.array(TEMP_HARDCODE_PATH)
+        self.path_tuples = np.load(os.path.join(cur_dir, PATH_NAME)).T
+        # self.path_tuples = np.array(TEMP_HARDCODE_PATH)
 
         self.path = utils.se2_pose_list_to_path(self.path_tuples, 'map')
         self.global_path_pub.publish(self.path)
@@ -145,6 +145,7 @@ class PathFollower():
                 x = (vel)*np.cos(init_theta)*sample_times + init_x
                 y = (vel)*np.sin(init_theta)*sample_times + init_y
         theta = (rot_vel*sample_times + init_theta) % np.pi*2
+        theta = theta + (theta > np.pi) * (-2*np.pi) + (theta < -np.pi)*(2*np.pi)
 
         return np.vstack((x, y, theta))
 
@@ -229,9 +230,14 @@ class PathFollower():
             Euclidean_dist = np.linalg.norm(local_paths[-1, :, :2] - self.cur_goal.reshape(1, 3)[:, :2], axis=1)
 
             final_cost = Euclidean_dist
-            if (np.linalg.norm(self.pose_in_map_np[:2] - self.cur_goal[:2]) < MIN_TRANS_DIST_TO_USE_ROT):
-                abs_angle_diff = np.abs(local_paths[-1, :, 2] - self.cur_goal.reshape(1, 3)[:, 2]) % 2*np.pi
-                rot_dist_from_goal = np.minimum(2*np.pi - abs_angle_diff, abs_angle_diff)
+            curr_dist_from_goal = np.linalg.norm(self.pose_in_map_np[:2] - self.cur_goal[:2])
+            if (curr_dist_from_goal < MIN_TRANS_DIST_TO_USE_ROT):
+                # abs_angle_diff = np.abs(local_paths[-1, :, 2] - self.cur_goal.reshape(1, 3)[:, 2]) % 2*np.pi
+                # rot_dist_from_goal = np.minimum(2*np.pi - abs_angle_diff, abs_angle_diff)
+                abs_angle_diff_1 = np.abs(local_paths[-1, :, 2] - self.cur_goal.reshape(1, 3)[:, 2])
+                abs_angle_diff_2 = np.abs(self.cur_goal.reshape(1, 3)[:, 2] - local_paths[-1, :, 2])
+                # abs_angle_diff = np.minimum(abs_angle_diff_1, abs_angle_diff_2) % 2*np.pi
+                rot_dist_from_goal = np.minimum(abs_angle_diff_1, abs_angle_diff_2) # np.minimum(2*np.pi - abs_angle_diff, abs_angle_diff)
                 final_cost += ROT_DIST_MULT*rot_dist_from_goal
 
             '''
@@ -248,20 +254,11 @@ class PathFollower():
             if final_cost.size == 0:  # hardcoded recovery if all options have collision
                 control = [-.1, 0]
             else:
-                import time
                 final_cost_min_index = final_cost.argmin()
                 best_opt = valid_opts[final_cost_min_index]
                 control = self.all_opts[best_opt]
                 self.local_path_pub.publish(utils.se2_pose_list_to_path(local_paths[:, final_cost_min_index], 'map'))
 
-                '''
-                print(best_opt)
-                while not rospy.is_shutdown():
-                    for i in range(len(valid_opts)):
-                        print(self.all_opts[valid_opts][i])
-                        self.local_path_pub.publish(utils.se2_pose_list_to_path(local_paths[:, i], 'map'))
-                        time.sleep(1)
-                '''
 
             # send command to robot
             self.cmd_pub.publish(utils.unicyle_vel_to_twist(control))
