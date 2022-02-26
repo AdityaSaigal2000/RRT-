@@ -142,6 +142,7 @@ class PathPlanner:
         self.occupancy_map = load_map(map_filename)
         self.map_shape = self.occupancy_map.shape
         self.map_settings_dict = load_map_yaml(map_setings_filename)
+        self.goal_index = -1
 
         #Get the metric bounds of the map
         self.bounds = np.zeros([2,2]) #m
@@ -178,13 +179,32 @@ class PathPlanner:
         self.error_thresh = 1e-2
 
         #Pygame window for visualization
-        self.viz = True
+        self.viz = False
         if self.viz is True:
             self.window = pygame_utils.PygameWindow(
                 "Path Planner", (1000, 1000), self.occupancy_map.shape, self.map_settings_dict, self.goal_point[:,0].copy(), self.stopping_dist)
         return
 
     #Functions required for RRT
+    def sample_map_ellipse(self, start_point, goal_point, bmax):
+        diff = start_point[:2,0] - goal_point[:2,0]
+        a = np.linalg.norm(diff)/2.0
+        h = a
+        k = 0
+
+        # Sample
+        y_aligned = (k-bmax) + np.random.rand()*(2*bmax)
+        b = np.random.rand()*bmax + 1e-14
+        parity = 1 if np.random.randint(2) == 0 else -1
+
+        # use Equation for Ellipse
+        x_aligned = parity*a*np.sqrt(1 - np.square((y_aligned-k)/b)) + h
+
+        angle = np.arctan2(diff[1], diff[0])
+
+        x = -x_aligned*np.cos(angle) + y_aligned*np.sin(angle) + start_point[0,0]
+        y = -x_aligned*np.sin(angle) - y_aligned*np.cos(angle) + start_point[1,0]
+        return np.array([[x],[y]])
     def sample_map_space(self, region=np.array([[0,0], [1600, 1600]]), rep="", center=None):
         '''
         Args:
@@ -426,9 +446,10 @@ class PathPlanner:
         # Use this for collision detection.
 
         # Generate points between the 2 landmarks
-        xs = np.linspace(node_i[0], world_sample[0], self.num_substeps + 2)
-        ys = np.linspace(node_i[1], world_sample[1], self.num_substeps + 2)
-        thetas = np.array([np.arctan2(point_f[1] - node_i[1], point_f[0] - node_i[0])]*(self.num_substeps + 2)).reshape((12,))
+        num_sub = 10
+        xs = np.linspace(node_i[0], world_sample[0], num_sub + 2)
+        ys = np.linspace(node_i[1], world_sample[1], num_sub + 2)
+        thetas = np.array([np.arctan2(world_sample[1] - node_i[1], world_sample[0] - node_i[0])]*(num_sub + 2)).reshape((num_sub + 2,))
 
         # Return sampled points on the trajectory in the world frame. Use previous collision detection functions to see if a collision free path exists
         return np.vstack((xs, ys, thetas))
@@ -497,7 +518,8 @@ class PathPlanner:
                 parent = self.nodes[parent_id]
                 cost = np.linalg.norm(parent.point[:2, 0] - point[:2, 0]) + parent.cost
                 self.nodes.append(Node(point, parent_id, cost, np.linalg.norm(point[:2, 0] - self.goal_point[:2, 0])))
-                self.window.add_se2_pose(point[:,0].copy(), length=2, width=2)
+                if self.viz:
+                    self.window.add_se2_pose(point[:,0].copy(), length=2, width=2)
 
                 _remove.append(sample)
                 if np.sqrt(np.sum(np.square(point[:2, 0] - self.goal_point[:2, 0]))) < self.stopping_dist:
@@ -530,7 +552,7 @@ class PathPlanner:
         goal_cell = self.point_to_cell(self.goal_point)
         return self.nodes, _remove
 
-    def rrt_star_planning(self, num_samples=1000, region=None, rep=""):
+    def rrt_star_planning(self, num_samples=1000, region=None, rep="", term=False):
         '''
         Args:
             - None
@@ -538,7 +560,7 @@ class PathPlanner:
             - NodeCollection object of built RRT structure
         '''
         same_dist = 0.2
-        neighbourhood_radius = 3
+        neighbourhood_radius = 5
         # This function performs RRT* for the given map and robot
         def extend(sample, _remove=[]):
             if self.check_if_duplicate(sample):
@@ -546,6 +568,8 @@ class PathPlanner:
 
             #Get the closest point
             closest_node_id = self.closest_node(sample)
+            if closest_node_id == len(self.nodes):
+                return Extend.FAILED
 
             #Simulate driving the robot towards the closest point
             trajectory_o = self.simulate_trajectory(self.nodes[closest_node_id].point, sample)
@@ -558,72 +582,90 @@ class PathPlanner:
                 new_point = trajectory_o.T[-1, :,None]
 
                 # Get collection of closest points
-                dist, inds = self.nodes.query(new_point[:2, 0], 10)
+                dist, inds = self.nodes.query(new_point[:2, 0, None], 10)
                 dist_arr = np.array(dist)
                 inds_arr = np.array(inds)
 
                 within_radius = dist_arr < neighbourhood_radius
 
                 smallest_id = closest_node_id
-                smallest_cost = np.sqrt(np.sum(np.square(parent.point[:2, 0] - new_point[:2, 0]))) + self.nodes[smallest_id].cost
+                smallest_cost = np.sqrt(np.sum(np.square(self.nodes[smallest_id].point[:2, 0] - new_point[:2, 0]))) + self.nodes[smallest_id].cost
 
                 dist_arr = dist_arr[within_radius]
                 inds_arr = inds_arr[within_radius]
+
                 for near_cost, near_ind in zip(dist_arr, inds_arr):
                     if near_cost < same_dist: # too close means duplicate
                         continue # process next
                     if self.nodes[near_ind].cost + near_cost > smallest_cost:
                         continue # this cost is not better so process next
 
-                    trajectory_o = self.connect_node_to_point(self.nodes[smallest_id].point, new_point[:2, 0])
-                    if not self.collision_detected(trajectory_o):
+                    connection = self.connect_node_to_point(self.nodes[near_ind].point[:2,0], new_point[:2, 0])
+                    if not self.collision_detected(connection):
                         smallest_id = near_ind
                         smallest_cost = near_cost + self.nodes[near_ind].cost
 
                 self.nodes.append(Node(new_point, smallest_id, smallest_cost, np.linalg.norm(new_point[:2, 0] - self.goal_point[:2, 0])))
                 new_ind = len(self.nodes)-1
-                for near_cost, near_ind in zip(dist_arr, inds_arr):
-                    if near_cost < same_dist: # too close means duplicate
+
+                for near_dist, near_ind in zip(dist_arr, inds_arr):
+                    if near_dist < same_dist: # too close means duplicate
                         continue # process next
 
-                    if self.nodes[new_ind].cost + near_cost > smallest_cost:
+                    if self.nodes[new_ind].cost + near_dist > self.nodes[near_ind].cost:
                         continue # this cost is not better so process next
 
-
-                    trajectory_o = self.connect_node_to_point(self.nodes[new_ind].point, self.nodes[near_ind].point[:2,0])
-                    if not self.collision_detected(trajectory_o):
-
+                    connection = self.connect_node_to_point(self.nodes[new_ind].point[:2,0], self.nodes[near_ind].point[:2,0])
+                    if not self.collision_detected(connection):
                         # update parent of near
                         near_old_parent_id = self.nodes[near_ind].parent_id
-                        self.nodes[near_old_parent_id].children_ids.remove(near_id)
+                        if near_ind in self.nodes[near_old_parent_id].children_ids:
+                            self.nodes[near_old_parent_id].children_ids.remove(near_ind)
                         self.nodes[near_ind].parent = new_ind
 
                         # update costs
                         old_near_cost = self.nodes[near_ind].cost
-                        self.nodes[near_ind].cost = self.nodes[new_ind].cost + near_cost
+                        self.nodes[near_ind].cost = self.nodes[new_ind].cost + near_dist
 
                         # update children of near
-                        self.update_children(self.nodes[near_ind], old_near_cost)
+                        self.update_children(near_ind, old_near_cost)
 
                 if np.sqrt(np.sum(np.square(self.nodes[new_ind].point[:2, 0] - self.goal_point[:2, 0]))) < self.stopping_dist:
                     return Extend.HITGOAL
                 return Extend.SUCCESS
-            return Extend.FAILED
-        _remove = []
 
+        _remove = []
+        improving = False
+        bmax = np.linalg.norm(self.nodes[0].point[:2,0] - self.goal_point[:2,0])/2
         #This function performs RRT on the given map and robot
         for _ in tqdm(range(num_samples)):
+            if not improving:
+                #Sample map space
+                sample_anchor = self.nodes.get_sample_center()
 
-            #Sample map space
-            sample_anchor = self.nodes.get_sample_center()
-            anchor = sample_anchor if sample_anchor is None else sample_anchor.point[:2, 0]
-            sample = self.sample_map_space(region, "polar", anchor) if rep == "polar" else self.sample_map_space(region)
+                anchor = sample_anchor if sample_anchor is None else sample_anchor.point[:2, 0]
+                sample = self.sample_map_space(region, "polar", anchor) if rep == "polar" else self.sample_map_space(region)
+            else:
+                #sample = self.sample_map_ellipse(self.nodes[0].point, self.goal_point, bmax)
+                region = np.array([[350, 400],
+                                   [1600, 1300]])
+
+                self.sample_map_space(region)
+            if self.viz is True:
+                self.window.add_point(sample[:,0].copy(), width=5, color=(0,0,255))
 
             ret_val = extend(sample, _remove)
             if ret_val == Extend.FAILED:
-                sample_anchor.num_fails += 1
+                if not improving:
+                    sample_anchor.num_fails += 1
+                else:
+                    bmax = bmax
             if ret_val == Extend.HITGOAL:
-                break
+                print("GOAL HAS BEEN REACH!")
+                self.goal_index = len(self.nodes)-1
+                improving = True
+                if term is True:
+                    break
 
         # Slightly different, do extend with goal points
         # If need to use RRT later, remove the below code
