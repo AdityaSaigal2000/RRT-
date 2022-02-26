@@ -179,7 +179,7 @@ class PathPlanner:
         self.error_thresh = 1e-2
 
         #Pygame window for visualization
-        self.viz = False
+        self.viz = True
         if self.viz is True:
             self.window = pygame_utils.PygameWindow(
                 "Path Planner", (1000, 1000), self.occupancy_map.shape, self.map_settings_dict, self.goal_point[:,0].copy(), self.stopping_dist)
@@ -187,24 +187,25 @@ class PathPlanner:
 
     #Functions required for RRT
     def sample_map_ellipse(self, start_point, goal_point, bmax):
-        diff = start_point[:2,0] - goal_point[:2,0]
+        diff = - start_point[:2,0] + goal_point[:2,0]
         a = np.linalg.norm(diff)/2.0
         h = a
         k = 0
 
         # Sample
-        y_aligned = (k-bmax) + np.random.rand()*(2*bmax)
-        b = np.random.rand()*bmax + 1e-14
-        parity = 1 if np.random.randint(2) == 0 else -1
+        r = np.random.rand()
+        theta = np.random.rand()*2*np.pi
 
         # use Equation for Ellipse
-        x_aligned = parity*a*np.sqrt(1 - np.square((y_aligned-k)/b)) + h
+        y_aligned = bmax*r*np.sin(theta)
+        x_aligned = a*np.cos(theta) + a
 
         angle = np.arctan2(diff[1], diff[0])
 
-        x = -x_aligned*np.cos(angle) + y_aligned*np.sin(angle) + start_point[0,0]
-        y = -x_aligned*np.sin(angle) - y_aligned*np.cos(angle) + start_point[1,0]
+        x = x_aligned*np.cos(angle) - y_aligned*np.sin(angle) + start_point[0,0]
+        y = x_aligned*np.sin(angle) + y_aligned*np.cos(angle) + start_point[1,0]
         return np.array([[x],[y]])
+
     def sample_map_space(self, region=np.array([[0,0], [1600, 1600]]), rep="", center=None):
         '''
         Args:
@@ -636,7 +637,7 @@ class PathPlanner:
 
         _remove = []
         improving = False
-        bmax = np.linalg.norm(self.nodes[0].point[:2,0] - self.goal_point[:2,0])/2
+        bmax = np.linalg.norm(self.nodes[0].point[:2,0] - self.goal_point[:2,0])/4
         #This function performs RRT on the given map and robot
         for _ in tqdm(range(num_samples)):
             if not improving:
@@ -646,11 +647,13 @@ class PathPlanner:
                 anchor = sample_anchor if sample_anchor is None else sample_anchor.point[:2, 0]
                 sample = self.sample_map_space(region, "polar", anchor) if rep == "polar" else self.sample_map_space(region)
             else:
-                #sample = self.sample_map_ellipse(self.nodes[0].point, self.goal_point, bmax)
+                sample = self.sample_map_ellipse(self.nodes[0].point, self.goal_point, bmax)
+                '''
                 region = np.array([[350, 400],
                                    [1600, 1300]])
 
-                self.sample_map_space(region)
+                sample = self.sample_map_space(region)
+                '''
             if self.viz is True:
                 self.window.add_point(sample[:,0].copy(), width=5, color=(0,0,255))
 
