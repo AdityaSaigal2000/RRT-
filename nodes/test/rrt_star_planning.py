@@ -16,7 +16,7 @@ def main():
         # cols 400 1600
         region = np.array([[350, 400],
                            [1600, 1300]])
-        map_filename ="willowgarageworld_05res.png"
+        map_filename = "willowgarageworld_05res.png"
         map_setings_filename = "willowgarageworld_05res.yaml"
         #robot information
         stopping_dist = 0.5 #m
@@ -30,8 +30,8 @@ def main():
         path_planner.occupancy_map[588:640, 404] = 0
         path_planner.occupancy_map[1376, 404:985] = 0
         path_planner.occupancy_map[687:777, 1293] = 0
-        region = np.array([[0.4, 10],[0,0]])
-        nodes, samples = path_planner.rrt_star_planning(2000, region, 'polar')
+        region = np.array([[0.2, 6],[0,0]])
+        nodes, samples = path_planner.rrt_star_planning(20000, region, 'polar')
         """
         for ind, node in enumerate(path_planner.nodes):
             if len(node.children_ids) == 0:

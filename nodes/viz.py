@@ -2,7 +2,14 @@ import matplotlib.pyplot as plt
 import numpy as np
 from l2_planning import *
 def main():
+    def plot_angle(c,r,theta):
+        t = np.linspace(0,50)
+        x = np.cos(-theta)*t + c
+        y = np.sin(-theta)*t + r
+        return x, y
+
     node_path_metric = np.load("shortest_path.npy")
+
     #Set map information
     # "willowgarageworld_05res.png"
     goal_cell = np.array([[1502],[1252]])
@@ -26,6 +33,10 @@ def main():
     plt.imshow(path_planner.occupancy_map)
     plt.plot(c, r)
     plt.scatter(c, r)
+    thetas = node_path_metric[2, :]
+    for cx, ry, th in zip(c, r, thetas):
+        px, py = plot_angle(cx, ry, th)
+        plt.plot(px,py,'k',linewidth=2)
     r,c = path_planner.point_to_cell(goal_point)
     plt.scatter(c, r)
 

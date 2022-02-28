@@ -93,7 +93,7 @@ class NodeCollection:
         if len(self.frontier) == 0:
             return None
         node = self.frontier[0]
-        if self.frontier[0].num_fails == 10:
+        if self.frontier[0].num_fails == 4:
             hq.heappop(self.frontier)
 
         return node
@@ -254,7 +254,7 @@ class PathPlanner:
             - bool True if in NodeCollection otherwise no
         '''
         dist, ind = self.nodes.query(point, 1)
-        return dist[0] < 0.2
+        return dist[0] < 0.05
 
     def closest_node(self, point):
         '''
@@ -455,9 +455,15 @@ class PathPlanner:
         # Return sampled points on the trajectory in the world frame. Use previous collision detection functions to see if a collision free path exists
         return np.vstack((xs, ys, thetas))
 
-    def cost_to_come(self, trajectory_o):
+    def cost_to_come(self, point1, point2, rot_weight=5):
         #The cost to get to a node from lavalle
-        dist_traveled=np.linalg.norm(trajectory_o[:2,0] - trajectory_o[:2,-1])
+        # Normalize based on eucedian, put difference in range of -pi to pi
+        aug_point1 = point1.copy()
+        aug_point1[2,0] *= rot_weight
+        aug_point2 = point2.copy()
+        aug_point2[2,0] *= rot_weight
+
+        dist_traveled=np.linalg.norm(aug_point1[:3,0] - aug_point2[:3,0])
         return dist_traveled
 
     def node_cost_to_come(self, node_id_1,  node_id_2):
@@ -560,7 +566,7 @@ class PathPlanner:
         Returns:
             - NodeCollection object of built RRT structure
         '''
-        same_dist = 0.2
+        same_dist = 0.05
         neighbourhood_radius = 5
         # This function performs RRT* for the given map and robot
         def extend(sample, _remove=[]):
@@ -570,6 +576,9 @@ class PathPlanner:
             #Get the closest point
             closest_node_id = self.closest_node(sample)
             if closest_node_id == len(self.nodes):
+                return Extend.FAILED
+
+            if closest_node_id == self.goal_index:
                 return Extend.FAILED
 
             #Simulate driving the robot towards the closest point
@@ -583,28 +592,28 @@ class PathPlanner:
                 new_point = trajectory_o.T[-1, :,None]
 
                 # Get collection of closest points
-                dist, inds = self.nodes.query(new_point[:2, 0, None], 10)
+                dist, inds = self.nodes.query(new_point[:2, 0, None], 100)
                 dist_arr = np.array(dist)
                 inds_arr = np.array(inds)
 
                 within_radius = dist_arr < neighbourhood_radius
 
                 smallest_id = closest_node_id
-                smallest_cost = np.sqrt(np.sum(np.square(self.nodes[smallest_id].point[:2, 0] - new_point[:2, 0]))) + self.nodes[smallest_id].cost
+                smallest_cost = self.cost_to_come(self.nodes[smallest_id].point, new_point) + self.nodes[smallest_id].cost
 
                 dist_arr = dist_arr[within_radius]
                 inds_arr = inds_arr[within_radius]
 
-                for near_cost, near_ind in zip(dist_arr, inds_arr):
-                    if near_cost < same_dist: # too close means duplicate
+                for near_dist, near_ind in zip(dist_arr, inds_arr):
+                    if near_dist < same_dist: # too close means duplicate
                         continue # process next
-                    if self.nodes[near_ind].cost + near_cost > smallest_cost:
+                    if self.nodes[near_ind].cost + self.cost_to_come(self.nodes[near_ind].point, new_point) > smallest_cost:
                         continue # this cost is not better so process next
 
                     connection = self.connect_node_to_point(self.nodes[near_ind].point[:2,0], new_point[:2, 0])
                     if not self.collision_detected(connection):
                         smallest_id = near_ind
-                        smallest_cost = near_cost + self.nodes[near_ind].cost
+                        smallest_cost = self.cost_to_come(self.nodes[near_ind].point, new_point) + self.nodes[near_ind].cost
 
                 self.nodes.append(Node(new_point, smallest_id, smallest_cost, np.linalg.norm(new_point[:2, 0] - self.goal_point[:2, 0])))
                 new_ind = len(self.nodes)-1
@@ -613,7 +622,7 @@ class PathPlanner:
                     if near_dist < same_dist: # too close means duplicate
                         continue # process next
 
-                    if self.nodes[new_ind].cost + near_dist > self.nodes[near_ind].cost:
+                    if self.nodes[new_ind].cost + self.cost_to_come(self.nodes[near_ind].point, self.nodes[new_ind].point) > self.nodes[near_ind].cost:
                         continue # this cost is not better so process next
 
                     connection = self.connect_node_to_point(self.nodes[new_ind].point[:2,0], self.nodes[near_ind].point[:2,0])
@@ -626,7 +635,7 @@ class PathPlanner:
 
                         # update costs
                         old_near_cost = self.nodes[near_ind].cost
-                        self.nodes[near_ind].cost = self.nodes[new_ind].cost + near_dist
+                        self.nodes[near_ind].cost = self.nodes[new_ind].cost + self.cost_to_come(self.nodes[near_ind].point, self.nodes[new_ind].point)
 
                         # update children of near
                         self.update_children(near_ind, old_near_cost)
@@ -647,33 +656,42 @@ class PathPlanner:
                 anchor = sample_anchor if sample_anchor is None else sample_anchor.point[:2, 0]
                 sample = self.sample_map_space(region, "polar", anchor) if rep == "polar" else self.sample_map_space(region)
             else:
-                sample = self.sample_map_ellipse(self.nodes[0].point, self.goal_point, bmax)
-                '''
+                # sample = self.sample_map_ellipse(self.nodes[0].point, self.goal_point, bmax)
+
                 region = np.array([[350, 400],
                                    [1600, 1300]])
 
                 sample = self.sample_map_space(region)
-                '''
+
             if self.viz is True:
                 self.window.add_point(sample[:,0].copy(), width=5, color=(0,0,255))
 
             ret_val = extend(sample, _remove)
             if ret_val == Extend.FAILED:
                 if not improving:
-                    sample_anchor.num_fails += 1
+                    if sample_anchor is not None:
+                        sample_anchor.num_fails += 1
                 else:
                     bmax = bmax
             if ret_val == Extend.HITGOAL:
                 print("GOAL HAS BEEN REACH!")
-                self.goal_index = len(self.nodes)-1
+                if self.goal_index == -1:
+                    self.goal_index = len(self.nodes)-1
                 improving = True
                 if term is True:
                     break
 
         # Slightly different, do extend with goal points
         # If need to use RRT later, remove the below code
-        extend(self.goal_point, _remove)
-        goal_cell = self.point_to_cell(self.goal_point)
+        '''
+        final_path = self.recover_path(self.goal_index)
+        node = len(self.nodes)-1
+        while node != -1:
+            if self.nodes[node].parent_id != -1:
+                diff = self.nodes[node].point[:2,0] - self.nodes[self.nodes[node].parent_id].point[:2,0]
+                self.nodes[node].point[2,0] = np.arctan2(diff[1], diff[0])
+            node = self.nodes[node].parent_id
+        '''
         return self.nodes, _remove
 
     def recover_path(self, node_id = -1):
