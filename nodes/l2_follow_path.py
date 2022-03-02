@@ -37,7 +37,7 @@ COLLISION_RADIUS = 0.225  # m, radius from base_link to use for collisions, min 
 ROT_DIST_MULT = 15  # multiplier to change effect of rotational distance in choosing correct control
 OBS_DIST_MULT = .1  # multiplier to change the effect of low distance to obstacles on a path
 MIN_TRANS_DIST_TO_USE_ROT = .1 # m, robot has to be within this distance to use rot distance in cost
-PATH_NAME = 'shortest_path_20000.npy'  # saved path from l2_planning.py, should be in the same directory as this file
+PATH_NAME = 'Final_path_rrt_star_20000.npy'  # saved path from l2_planning.py, should be in the same directory as this file
 
 # here are some hardcoded paths to use if you want to develop l2_planning and this file in parallel
 TEMP_HARDCODE_PATH = [[2, -0.5, 0], [2.75, -1, -np.pi/2], [2.75, -4, -np.pi/2], [2, -4.4, np.pi]]  # almost collision-free
@@ -250,6 +250,7 @@ class PathFollower():
                 print(ind)
                 ind+=1
             '''
+
 
             if final_cost.size == 0:  # hardcoded recovery if all options have collision
                 control = [-.1, 0]
