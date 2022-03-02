@@ -53,7 +53,7 @@ class Node:
         self.point = point # A 3 by 1 vector [x, y, theta]
         self.parent_id = parent_id # The parent node id that leads to this node (There should only every be one parent in RRT)
         self.cost = cost # The cost to come to this node
-        self.full_cost = cost + 5*heuristic # A_start like total cost function used for sampling priority, weight exploration more
+        self.full_cost = cost + 10*heuristic # A_start like total cost function used for sampling priority, weight exploration more
         self.children_ids = [] # The children node ids of this node
         self.num_fails = 0 #number of times we failed to sample a good point from this node
         return
@@ -93,8 +93,7 @@ class NodeCollection:
         if len(self.frontier) == 0:
             return None
         node = self.frontier[0]
-        # Keep no matter what
-        if self.frontier[0].num_fails == 10:
+        if self.frontier[0].num_fails == 4:
             hq.heappop(self.frontier)
 
         return node
@@ -125,6 +124,9 @@ class NodeCollection:
             new_point = node.point if node.point.shape[1]==3 else node.point.T
             self.val_arr = np.vstack([self.val_arr, new_point[:,:2]])
 
+        # update children ids of parent
+        if node.parent_id != -1:
+            self[node.parent_id].children_ids.append(len(self)-1)
 
     def __len__(self):
         return len(self.list)
@@ -140,6 +142,7 @@ class PathPlanner:
         self.occupancy_map = load_map(map_filename)
         self.map_shape = self.occupancy_map.shape
         self.map_settings_dict = load_map_yaml(map_setings_filename)
+        self.goal_index = -1
 
         #Get the metric bounds of the map
         self.bounds = np.zeros([2,2]) #m
@@ -176,11 +179,33 @@ class PathPlanner:
         self.error_thresh = 1e-2
 
         #Pygame window for visualization
-        # self.window = pygame_utils.PygameWindow(
-        #    "Path Planner", (1000, 1000), self.occupancy_map.shape, self.map_settings_dict, self.goal_point, self.stopping_dist)
+        self.viz = True
+        if self.viz is True:
+            self.window = pygame_utils.PygameWindow(
+                "Path Planner", (1000, 1000), self.occupancy_map.shape, self.map_settings_dict, self.goal_point[:,0].copy(), self.stopping_dist)
         return
 
     #Functions required for RRT
+    def sample_map_ellipse(self, start_point, goal_point, bmax):
+        diff = - start_point[:2,0] + goal_point[:2,0]
+        a = np.linalg.norm(diff)/2.0
+        h = a
+        k = 0
+
+        # Sample
+        r = np.random.rand()
+        theta = np.random.rand()*2*np.pi
+
+        # use Equation for Ellipse
+        y_aligned = bmax*r*np.sin(theta)
+        x_aligned = a*np.cos(theta) + a
+
+        angle = np.arctan2(diff[1], diff[0])
+
+        x = x_aligned*np.cos(angle) - y_aligned*np.sin(angle) + start_point[0,0]
+        y = x_aligned*np.sin(angle) + y_aligned*np.cos(angle) + start_point[1,0]
+        return np.array([[x],[y]])
+
     def sample_map_space(self, region=np.array([[0,0], [1600, 1600]]), rep="", center=None):
         '''
         Args:
@@ -229,8 +254,7 @@ class PathPlanner:
             - bool True if in NodeCollection otherwise no
         '''
         dist, ind = self.nodes.query(point, 1)
-
-        return dist[0] < 0.2
+        return dist[0] < 0.05
 
     def closest_node(self, point):
         '''
@@ -411,46 +435,62 @@ class PathPlanner:
         card_V = len(self.nodes)
         return min(self.gamma_RRT * (np.log(card_V) / card_V ) ** (1.0/2.0), self.epsilon)
 
-    def connect_node_to_point(self, node_i, point_f):
+    def connect_node_to_point(self, node_i, world_sample):
         #Given two nodes find the non-holonomic path that connects them
         #Settings
         #node is a 3 by 1 node (with coordinates in the world space)
-        #point is a 2 by 1 point (with coordinates [x, y] in the map frame)
+        #world_sample is a 2 by 1 point (with coordinates [x, y] in world sapce)
 
         # Aditya Saigal
         # Function used to find a connection between newly sampled point and an existing node in the nearest neighbor list.
         # Find the straight linear trajectory between the 2 points, as expressed in the world frame. If a line exists, then the heading can be adjusted to go from one node to the other.
         # Use this for collision detection.
 
-        # Convert sample point to world frame
-
-        world_sample = np.array([[self.map_settings_dict["origin"][0] + point_f[0][0]*self.map_settings_dict["resolution"]], [self.map_settings_dict["origin"][1] + point_f[1][0]*self.map_settings_dict["resolution"]]]) # 2x1 vector
-
         # Generate points between the 2 landmarks
-        xs = np.linspace(node_i[0], world_sample[0], self.num_substeps + 2)
-        ys = np.linspace(node_i[1], world_sample[1], self.num_substeps + 2)
-        thetas = np.array([np.arctan2(point_f[1] - node_i[1], point_f[0] - node_i[0])]*(self.num_substeps + 2)).reshape((12,))
+        num_sub = 10
+        xs = np.linspace(node_i[0], world_sample[0], num_sub + 2)
+        ys = np.linspace(node_i[1], world_sample[1], num_sub + 2)
+        thetas = np.array([np.arctan2(world_sample[1] - node_i[1], world_sample[0] - node_i[0])]*(num_sub + 2)).reshape((num_sub + 2,))
 
         # Return sampled points on the trajectory in the world frame. Use previous collision detection functions to see if a collision free path exists
         return np.vstack((xs, ys, thetas))
 
-    def cost_to_come(self, trajectory_o):
+    def cost_to_come(self, point1, point2, rot_weight=5):
         #The cost to get to a node from lavalle
-        print("TO DO: Implement a cost to come metric")
-        return 0
+        # Normalize based on eucedian, put difference in range of -pi to pi
+        aug_point1 = point1.copy()
+        aug_point1[2,0] *= rot_weight
+        aug_point2 = point2.copy()
+        aug_point2[2,0] *= rot_weight
 
-    def update_children(self, node_id):
+        dist_traveled=np.linalg.norm(aug_point1[:3,0] - aug_point2[:3,0])
+        return dist_traveled
+
+    def node_cost_to_come(self, node_id_1,  node_id_2):
+        # Calculate the l2-norm distance between two node objects
+        dist_traveled = np.linalg.norm(self.nodes[node_id_1].point[:2, 0] -self.nodes[node_id_2].point[:2,0])
+        return dist_traveled
+
+    def update_children(self, node_id, old_cost):
+        '''
+        Args:
+            node_id - int the id of the node that was changed, i.e some parent that
+            was rewired
+            old_cost - float, the old cost to come to node_id, before rewiring
+        Returns:
+            Nothing - update happens silently
+        '''
         #Given a node_id with a changed cost, update all connected nodes with the new cost
-        print("TO DO: Update the costs of connected nodes after rewiring.")
-        return
+
+        ids_update_required = self.nodes[node_id].children_ids[:]
+        new_cost = self.nodes[node_id].cost
+        while len(ids_update_required) > 0:
+            problem_child = ids_update_required.pop(0)
+            self.nodes[problem_child].cost += new_cost - old_cost
+            ids_update_required += self.nodes[problem_child].children_ids
+        return True
 
     def collision_detected(self, trajectory):
-        # note that 0 means we cannot occupy that cell
-        # and 1 means that we are able to occupy it i.e.
-        # if all 1, then trajectory is valid
-        #TODO: Got index out of bounds error
-        # returns true if there is an obstacle in the way
-
         #returns True if trajectory DNE
         if trajectory is None:
             return True
@@ -483,8 +523,10 @@ class PathPlanner:
                 point = trajectory_o.T[-1, :,None]
                 parent_id = closest_node_id
                 parent = self.nodes[parent_id]
-                cost = np.sqrt(np.sum(np.square(parent.point[:2, 0] - point[:2, 0]))) + parent.cost
-                self.nodes.append(Node(point, parent_id, cost, np.sqrt(np.sum(np.square(point[:2, 0] - self.goal_point[:2, 0])))))
+                cost = np.linalg.norm(parent.point[:2, 0] - point[:2, 0]) + parent.cost
+                self.nodes.append(Node(point, parent_id, cost, np.linalg.norm(point[:2, 0] - self.goal_point[:2, 0])))
+                if self.viz:
+                    self.window.add_se2_pose(point[:,0].copy(), length=2, width=2)
 
                 _remove.append(sample)
                 if np.sqrt(np.sum(np.square(point[:2, 0] - self.goal_point[:2, 0]))) < self.stopping_dist:
@@ -498,11 +540,16 @@ class PathPlanner:
         for _ in tqdm(range(num_samples)):
             #Sample map space
             sample_anchor = self.nodes.get_sample_center()
+
+            if self.viz is True:
+                if sample_anchor is not None:
+                    self.window.add_se2_pose(sample_anchor.point[:, 0].copy(), length=5, width=5, color=(0,0,255))
             anchor = sample_anchor if sample_anchor is None else sample_anchor.point[:2, 0]
-            sample = self.sample_map_space(region, "polar", sample_anchor.point[:2,0] ) if rep == "polar" else self.sample_map_space(region)
+            sample = self.sample_map_space(region, "polar", anchor) if rep == "polar" else self.sample_map_space(region)
             ret_val = extend(sample, _remove)
             if ret_val == Extend.FAILED:
-                sample_anchor.num_fails += 1
+                if sample_anchor is not None:
+                    sample_anchor.num_fails += 1
             if ret_val == Extend.HITGOAL:
                 break
 
@@ -512,36 +559,147 @@ class PathPlanner:
         goal_cell = self.point_to_cell(self.goal_point)
         return self.nodes, _remove
 
-    def rrt_star_planning(self):
-        #This function performs RRT* for the given map and robot
-        for i in range(1): #Most likely need more iterations than this to complete the map!
-            #Sample
-            point = self.sample_map_space()
+    def rrt_star_planning(self, num_samples=1000, region=None, rep="", term=False):
+        '''
+        Args:
+            - None
+        Returns:
+            - NodeCollection object of built RRT structure
+        '''
+        same_dist = 0.05
+        neighbourhood_radius = 5
+        # This function performs RRT* for the given map and robot
+        def extend(sample, _remove=[]):
+            if self.check_if_duplicate(sample):
+                return Extend.FAILED
 
-            #Closest Node
-            closest_node_id = self.closest_node(point)
+            #Get the closest point
+            closest_node_id = self.closest_node(sample)
+            if closest_node_id == len(self.nodes):
+                return Extend.FAILED
 
-            #Simulate trajectory
-            print(self.nodes[closest_node_id])
-            trajectory_o = self.simulate_trajectory(self.nodes[closest_node_id].point, point)
+            if closest_node_id == self.goal_index:
+                return Extend.FAILED
 
-            #Check for Collision
-            print("TO DO: Check for collision.")
+            #Simulate driving the robot towards the closest point
+            trajectory_o = self.simulate_trajectory(self.nodes[closest_node_id].point, sample)
 
-            #Last node rewire
-            print("TO DO: Last node rewiring")
+            #Check for collisions
+            if self.collision_detected(trajectory_o):
+                return Extend.FAILED
+            else:
+                _remove.append(sample)
+                new_point = trajectory_o.T[-1, :,None]
 
-            #Close node rewire
-            print("TO DO: Near point rewiring")
+                # Get collection of closest points
+                dist, inds = self.nodes.query(new_point[:2, 0, None], 100)
+                dist_arr = np.array(dist)
+                inds_arr = np.array(inds)
 
-            #Check for early end
-            print("TO DO: Check for early end")
-        return self.nodes
+                within_radius = dist_arr < neighbourhood_radius
+
+                smallest_id = closest_node_id
+                smallest_cost = self.cost_to_come(self.nodes[smallest_id].point, new_point) + self.nodes[smallest_id].cost
+
+                dist_arr = dist_arr[within_radius]
+                inds_arr = inds_arr[within_radius]
+
+                for near_dist, near_ind in zip(dist_arr, inds_arr):
+                    if near_dist < same_dist: # too close means duplicate
+                        continue # process next
+                    if self.nodes[near_ind].cost + self.cost_to_come(self.nodes[near_ind].point, new_point) > smallest_cost:
+                        continue # this cost is not better so process next
+
+                    connection = self.connect_node_to_point(self.nodes[near_ind].point[:2,0], new_point[:2, 0])
+                    if not self.collision_detected(connection):
+                        smallest_id = near_ind
+                        smallest_cost = self.cost_to_come(self.nodes[near_ind].point, new_point) + self.nodes[near_ind].cost
+
+                self.nodes.append(Node(new_point, smallest_id, smallest_cost, np.linalg.norm(new_point[:2, 0] - self.goal_point[:2, 0])))
+                new_ind = len(self.nodes)-1
+
+                for near_dist, near_ind in zip(dist_arr, inds_arr):
+                    if near_dist < same_dist: # too close means duplicate
+                        continue # process next
+
+                    if self.nodes[new_ind].cost + self.cost_to_come(self.nodes[near_ind].point, self.nodes[new_ind].point) > self.nodes[near_ind].cost:
+                        continue # this cost is not better so process next
+
+                    connection = self.connect_node_to_point(self.nodes[new_ind].point[:2,0], self.nodes[near_ind].point[:2,0])
+                    if not self.collision_detected(connection):
+                        # update parent of near
+                        near_old_parent_id = self.nodes[near_ind].parent_id
+                        if near_ind in self.nodes[near_old_parent_id].children_ids:
+                            self.nodes[near_old_parent_id].children_ids.remove(near_ind)
+                        self.nodes[near_ind].parent = new_ind
+
+                        # update costs
+                        old_near_cost = self.nodes[near_ind].cost
+                        self.nodes[near_ind].cost = self.nodes[new_ind].cost + self.cost_to_come(self.nodes[near_ind].point, self.nodes[new_ind].point)
+
+                        # update children of near
+                        self.update_children(near_ind, old_near_cost)
+
+                if np.sqrt(np.sum(np.square(self.nodes[new_ind].point[:2, 0] - self.goal_point[:2, 0]))) < self.stopping_dist:
+                    return Extend.HITGOAL
+                return Extend.SUCCESS
+
+        _remove = []
+        improving = False
+        bmax = np.linalg.norm(self.nodes[0].point[:2,0] - self.goal_point[:2,0])/4
+        #This function performs RRT on the given map and robot
+        for _ in tqdm(range(num_samples)):
+            if not improving:
+                #Sample map space
+                sample_anchor = self.nodes.get_sample_center()
+
+                anchor = sample_anchor if sample_anchor is None else sample_anchor.point[:2, 0]
+                sample = self.sample_map_space(region, "polar", anchor) if rep == "polar" else self.sample_map_space(region)
+            else:
+                # sample = self.sample_map_ellipse(self.nodes[0].point, self.goal_point, bmax)
+
+                region = np.array([[350, 400],
+                                   [1600, 1300]])
+
+                sample = self.sample_map_space(region)
+
+            if self.viz is True:
+                self.window.add_point(sample[:,0].copy(), width=5, color=(0,0,255))
+
+            ret_val = extend(sample, _remove)
+            if ret_val == Extend.FAILED:
+                if not improving:
+                    if sample_anchor is not None:
+                        sample_anchor.num_fails += 1
+                else:
+                    bmax = bmax
+            if ret_val == Extend.HITGOAL:
+                print("GOAL HAS BEEN REACH!")
+                if self.goal_index == -1:
+                    self.goal_index = len(self.nodes)-1
+                improving = True
+                if term is True:
+                    break
+
+        # Slightly different, do extend with goal points
+        # If need to use RRT later, remove the below code
+        '''
+        final_path = self.recover_path(self.goal_index)
+        node = len(self.nodes)-1
+        while node != -1:
+            if self.nodes[node].parent_id != -1:
+                diff = self.nodes[node].point[:2,0] - self.nodes[self.nodes[node].parent_id].point[:2,0]
+                self.nodes[node].point[2,0] = np.arctan2(diff[1], diff[0])
+            node = self.nodes[node].parent_id
+        '''
+        return self.nodes, _remove
 
     def recover_path(self, node_id = -1):
         path = [self.nodes[node_id].point]
         current_node_id = self.nodes[node_id].parent_id
         while current_node_id > -1:
+            if self.viz is True:
+                    self.window.add_se2_pose(self.nodes[current_node_id].point[:, 0].copy(), length=5, width=5, color=(255,0,0))
             path.append(self.nodes[current_node_id].point)
             current_node_id = self.nodes[current_node_id].parent_id
         path.reverse()
